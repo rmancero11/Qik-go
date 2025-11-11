@@ -1,0 +1,88 @@
+-- FUNCION QUE GENERA LAS ENTRADAS DE LA TABLA movimientos
+CREATE OR REPLACE FUNCTION fn_generar_movimientos_diarios()
+RETURNS void AS $$
+DECLARE
+    v_fecha DATE := CURRENT_DATE - INTERVAL '1 day';
+    v_id_clase_venta INT;
+    v_id_clase_sueldo INT;
+    v_id_clase_insumo INT;
+    v_id_clase_servicio INT;
+    v_id_forma_transferencia INT;
+BEGIN
+    -- Buscar IDs de clase de movimiento
+    SELECT id_clase INTO v_id_clase_venta FROM clase_movimiento WHERE clase = 'venta';
+    SELECT id_clase INTO v_id_clase_sueldo FROM clase_movimiento WHERE clase = 'pago de sueldo';
+    SELECT id_clase INTO v_id_clase_insumo FROM clase_movimiento WHERE clase = 'compra a proveedor';
+    SELECT id_clase INTO v_id_clase_servicio FROM clase_movimiento WHERE clase = 'pago de servicio';
+
+    -- ID de forma de pago "transferencia"
+    SELECT id_forma_pago INTO v_id_forma_transferencia FROM formas_pago WHERE forma_pago = 'transferencia';
+
+    -- Ventas (estado finalizada)
+    INSERT INTO movimientos (id_tabla, fecha, id_clase, id_local, id_forma_pago, id_moneda, monto, monto_dolares)
+    SELECT 
+        v.id_venta,
+        DATE(v.fecha),
+        v_id_clase_venta,
+        v.id_local,
+        v.id_forma_pago,
+        v.id_moneda,
+        v.monto,
+        ROUND(v.monto * (1.0 / m.conversion_USD), 2)
+    FROM ventas v
+    JOIN monedas m ON m.id_moneda = v.id_moneda
+    WHERE DATE(v.fecha) = v_fecha AND v.estado = 'finalizada';
+
+    -- Pago de sueldos
+    INSERT INTO movimientos (id_tabla, fecha, id_clase, id_local, id_forma_pago, id_moneda, monto, monto_dolares)
+    SELECT 
+        ps.id_pago,
+        ps.fecha_pago,
+        v_id_clase_sueldo,
+        ps.id_local,
+        v_id_forma_transferencia,
+        ps.id_moneda,
+        ps.costo_empleador,
+        ROUND(ps.costo_empleador * (1.0 / m.conversion_USD), 2)
+    FROM pago_sueldos ps
+    JOIN monedas m ON m.id_moneda = ps.id_moneda
+    WHERE ps.fecha_pago = v_fecha;
+
+    -- Pagos insumos
+    INSERT INTO movimientos (id_tabla, fecha, id_clase, id_local, id_forma_pago, id_moneda, monto, monto_dolares)
+    SELECT 
+        pi.id_pedido,
+        DATE(pi.fecha_pago),
+        v_id_clase_insumo,
+        pi.id_local,
+        pi.id_forma_pago,
+        pi.id_moneda,
+        pi.monto_total,
+        ROUND(pi.monto_total * (1.0 / m.conversion_USD), 2)
+    FROM pagos_insumos pi
+    JOIN monedas m ON m.id_moneda = pi.id_moneda
+    WHERE DATE(pi.fecha_pago) = v_fecha;
+
+    -- Pagos servicios
+    INSERT INTO movimientos (id_tabla, fecha, id_clase, id_local, id_forma_pago, id_moneda, monto, monto_dolares)
+    SELECT 
+        ps.id_pago,
+        DATE(ps.fecha_pago),
+        v_id_clase_servicio,
+        ps.id_local,
+        v_id_forma_transferencia,
+        ps.id_moneda,
+        ps.monto,
+        ROUND(ps.monto * (1.0 / m.conversion_USD), 2)
+    FROM pagos_servicios ps
+    JOIN monedas m ON m.id_moneda = ps.id_moneda
+    WHERE DATE(ps.fecha_pago) = v_fecha;
+
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT cron.schedule(
+  'ejecutar_movimientos_diarios',
+  '0 2 * * *',  -- Todos los días a las 02:00 AM
+  $$SELECT fn_generar_movimientos_diarios();$$
+);
